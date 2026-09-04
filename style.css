@@ -1,0 +1,278 @@
+:root {
+  --bg: #f3f1ec;
+  --card: #ffffff;
+  --text: #1b1b1b;
+  --muted: #6b6b6b;
+  --accent: #c2552f;
+  --accent-text: #ffffff;
+  --border: rgba(0, 0, 0, 0.1);
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.tg) {
+    --bg: #161616;
+    --card: #222222;
+    --text: #f0ede8;
+    --muted: #9a9a9a;
+    --border: rgba(255, 255, 255, 0.12);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  overflow-x: hidden;
+  -webkit-text-size-adjust: 100%;
+}
+
+.app {
+  max-width: 640px;
+  margin: 0 auto;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
+}
+
+/* Превью */
+.preview {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg);
+  padding: calc(10px + env(safe-area-inset-top)) 12px 8px;
+}
+
+.preview canvas {
+  display: block;
+  width: 100%;
+  height: 42vh;
+  height: 42dvh;
+  min-height: 220px;
+  max-height: 420px;
+  border-radius: 14px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2);
+  background: #ccc;
+}
+
+.caption {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Контролы */
+.controls {
+  padding: 6px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+section h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+}
+
+.step {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 700;
+  align-items: center;
+  justify-content: center;
+  margin-right: 8px;
+  flex: none;
+}
+
+/* Паттерны */
+.patterns {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+@media (min-width: 520px) {
+  .patterns { grid-template-columns: repeat(4, 1fr); }
+}
+
+.pattern {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 2px solid var(--border);
+  background: var(--card);
+  border-radius: 12px;
+  padding: 8px;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 44px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.pattern[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.pattern canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 3 / 2;
+  height: auto;
+  border-radius: 8px;
+  margin-bottom: 4px;
+  background: #ccc;
+}
+
+.p-name { font-weight: 600; font-size: 14px; line-height: 1.2; }
+.p-sub { font-size: 12px; color: var(--muted); line-height: 1.25; }
+
+/* Свотчи */
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 14px;
+  padding: 4px 4px 0;
+}
+
+.swatch {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 0, 0, 0.18);
+  background: var(--c);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25), 0 1px 3px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+  flex: none;
+  transition: transform 0.12s;
+}
+
+.swatch:active { transform: scale(0.94); }
+
+.swatch[aria-checked="true"] {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.swatch[aria-checked="true"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 14px;
+  height: 8px;
+  border-left: 3px solid #fff;
+  border-bottom: 3px solid #fff;
+  transform: translate(-50%, -65%) rotate(-45deg);
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.6));
+}
+
+.swatch.light[aria-checked="true"]::after {
+  border-color: #222;
+  filter: none;
+}
+
+.sel {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 10px;
+  min-height: 1.3em;
+}
+
+.sel b { color: var(--text); font-weight: 600; }
+
+/* Кнопка сохранения */
+.save {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  min-height: 50px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.save:disabled { opacity: 0.6; cursor: default; }
+
+/* Оверлей с результатом (fallback, если share недоступен) */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  color: #fff;
+  text-align: center;
+}
+
+.overlay img {
+  max-width: 100%;
+  max-height: 65vh;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+
+.overlay p { margin: 0; font-size: 14px; color: #ccc; }
+
+.overlay .row { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+
+.overlay a, .overlay button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font: inherit;
+  font-size: 15px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.overlay a.primary { background: var(--accent); border-color: var(--accent); }
