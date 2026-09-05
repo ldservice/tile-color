@@ -29,8 +29,32 @@ const JOINT_COLORS = [
   { id: 'black', name: 'Чёрный контрастный', code: 'RAL 9005', hex: '#1E1E1E' },
 ];
 
+/*
+ * Фото дома заказчика. Координаты полигонов — в долях ширины/высоты картинки.
+ * regions — зоны, где может быть стена; holes — исключения (окна, ствол, столб).
+ * Внутри зон стена дополнительно отбирается по цвету (серая плитка): низкая
+ * насыщенность (chroma) и средняя яркость.
+ */
+const PHOTO = {
+  src: './assets/house.jpg',
+  wallMM: 6300, // сколько мм стены укладывается в ширину фото (задаёт размер кирпича)
+  focus: [0.5, 0.6], // точка, вокруг которой кадрируется превью
+  key: { chromaMax: 0.12, lumMin: 0.22, lumMax: 0.92 },
+  shadeGain: 1.1, // нормировка освещения: среднее по стене → 1/shadeGain
+  regions: [
+    [[0.165, 0.313], [1.0, 0.281], [1.0, 0.911], [0.165, 0.911]],
+  ],
+  holes: [
+    [[0.3575, 0.300], [0.7825, 0.296], [0.7825, 0.727], [0.3575, 0.727]], // окно
+    [[0.650, 0.550], [0.800, 0.550], [0.800, 0.840], [0.650, 0.840]],     // фанерный щит
+    [[0.755, 0.270], [0.845, 0.270], [0.905, 0.955], [0.830, 0.955]],     // ствол дерева
+    [[0.659, 0.270], [0.676, 0.270], [0.676, 0.920], [0.659, 0.920]],     // столб забора
+  ],
+};
+
+const MODES = ['photo', 'scheme'];
 const STORAGE_KEY = 'facade-config-v1';
-const DEFAULT_STATE = { pattern: 'classic', brick: 'terracotta', joint: 'cement' };
+const DEFAULT_STATE = { mode: 'photo', pattern: 'classic', brick: 'terracotta', joint: 'cement' };
 
 function byId(list, id) { return list.find((x) => x.id === id); }
 
@@ -38,7 +62,8 @@ function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
     if (s && byId(PATTERNS, s.pattern) && byId(BRICK_COLORS, s.brick) && byId(JOINT_COLORS, s.joint)) {
-      return { pattern: s.pattern, brick: s.brick, joint: s.joint };
+      const mode = MODES.includes(s.mode) ? s.mode : DEFAULT_STATE.mode;
+      return { mode, pattern: s.pattern, brick: s.brick, joint: s.joint };
     }
   } catch (e) { /* localStorage недоступен — работаем без него */ }
   return { ...DEFAULT_STATE };
@@ -302,11 +327,211 @@ function fitCanvas(canvas) {
   return { ctx, w, h };
 }
 
+/* ---------- Режим «Фото дома» ---------- */
+
+const photo = {
+  canvas: null, w: 0, h: 0,
+  mask: null, shade: null, layer: null, layerKey: '',
+  ready: false, failed: false, debug: false,
+  panX: 0, // смещение кадра по горизонтали в px фото
+};
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// Раздельное box-размытие Float32Array (w×h), края — повтор крайнего пикселя.
+function boxBlur(src, w, h, r) {
+  if (r < 1) return Float32Array.from(src);
+  const tmp = new Float32Array(w * h), out = new Float32Array(w * h);
+  const k = 1 / (2 * r + 1);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let acc = 0;
+    for (let x = -r; x <= r; x++) acc += src[row + clamp(x, 0, w - 1)];
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = acc * k;
+      acc += src[row + clamp(x + r + 1, 0, w - 1)] - src[row + clamp(x - r, 0, w - 1)];
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    let acc = 0;
+    for (let y = -r; y <= r; y++) acc += tmp[clamp(y, 0, h - 1) * w + x];
+    for (let y = 0; y < h; y++) {
+      out[y * w + x] = acc * k;
+      acc += tmp[clamp(y + r + 1, 0, h - 1) * w + x] - tmp[clamp(y - r, 0, h - 1) * w + x];
+    }
+  }
+  return out;
+}
+
+// Растеризует полигоны зон/исключений в маску 0..1 через canvas (быстрее point-in-polygon).
+function rasterizePolygons(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  const trace = (poly) => {
+    ctx.beginPath();
+    poly.forEach(([x, y], i) => (i ? ctx.lineTo(x * w, y * h) : ctx.moveTo(x * w, y * h)));
+    ctx.closePath();
+    ctx.fill();
+  };
+  ctx.fillStyle = '#fff';
+  PHOTO.regions.forEach(trace);
+  ctx.globalCompositeOperation = 'destination-out';
+  PHOTO.holes.forEach(trace);
+  return ctx.getImageData(0, 0, w, h).data;
+}
+
+// Один раз: маска стены (цветовой ключ ∩ полигоны) и карта освещения.
+function buildPhotoLayers() {
+  const { w, h } = photo;
+  const data = photo.canvas.getContext('2d').getImageData(0, 0, w, h).data;
+  const poly = rasterizePolygons(w, h);
+  const n = w * h;
+  const mask = new Float32Array(n), lum = new Float32Array(n), lm = new Float32Array(n);
+  const key = PHOTO.key;
+  let sum = 0, cnt = 0;
+  for (let i = 0; i < n; i++) {
+    const r = data[i * 4] / 255, g = data[i * 4 + 1] / 255, b = data[i * 4 + 2] / 255;
+    const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    lum[i] = L;
+    if (poly[i * 4 + 3] > 127) {
+      const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+      if (chroma <= key.chromaMax && L >= key.lumMin && L <= key.lumMax) {
+        mask[i] = 1; lm[i] = L; sum += L; cnt++;
+      }
+    }
+  }
+  const mean = cnt ? sum / cnt : 0.5;
+
+  // Освещение: размытая яркость только по пикселям стены (нормированное размытие),
+  // радиус ≈ 1.5 высоты кирпича, чтобы старые швы пропали, а тени остались.
+  const brickH = 65 * (w / PHOTO.wallMM);
+  const r = Math.max(2, Math.round(brickH * 1.5));
+  const bl = boxBlur(lm, w, h, r), bm = boxBlur(mask, w, h, r);
+  const soft = boxBlur(mask, w, h, 1);
+
+  const shade = document.createElement('canvas');
+  shade.width = w; shade.height = h;
+  const sctx = shade.getContext('2d');
+  const sImg = sctx.createImageData(w, h);
+  const maskC = document.createElement('canvas');
+  maskC.width = w; maskC.height = h;
+  const mctx = maskC.getContext('2d');
+  const mImg = mctx.createImageData(w, h);
+  const norm = mean * PHOTO.shadeGain;
+  for (let i = 0; i < n; i++) {
+    const l = bm[i] > 0.02 ? bl[i] / bm[i] : mean;
+    const v = clamp(l / norm, 0, 1) * 255;
+    sImg.data[i * 4] = sImg.data[i * 4 + 1] = sImg.data[i * 4 + 2] = v;
+    sImg.data[i * 4 + 3] = 255;
+    mImg.data[i * 4 + 3] = soft[i] * 255;
+  }
+  sctx.putImageData(sImg, 0, 0);
+  mctx.putImageData(mImg, 0, 0);
+  photo.shade = shade;
+  photo.mask = maskC;
+  photo.layer = document.createElement('canvas');
+  photo.layer.width = w; photo.layer.height = h;
+  photo.layerKey = '';
+}
+
+function loadPhoto() {
+  const img = new Image();
+  img.decoding = 'async';
+  img.onload = () => {
+    try {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      photo.canvas = c; photo.w = c.width; photo.h = c.height;
+      buildPhotoLayers();
+      photo.ready = true;
+    } catch (e) {
+      console.warn('Фото: не удалось подготовить слои', e);
+      photo.failed = true;
+    }
+    syncUI();
+    scheduleRender();
+  };
+  img.onerror = () => { photo.failed = true; console.warn('Фото не загрузилось'); syncUI(); scheduleRender(); };
+  img.src = PHOTO.src;
+}
+
+// Слой новой стены в координатах фото: кладка × освещение, обрезанная по маске.
+function ensurePhotoLayer(st) {
+  const key = [st.pattern, st.brick, st.joint, photo.debug ? 'dbg' : ''].join('|');
+  if (photo.layerKey === key) return photo.layer;
+  const { w, h } = photo;
+  const ctx = photo.layer.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.clearRect(0, 0, w, h);
+  if (photo.debug) {
+    ctx.fillStyle = 'rgba(255,0,0,0.6)';
+    ctx.fillRect(0, 0, w, h);
+  } else {
+    renderWall(ctx, w, h, st, { wallMM: PHOTO.wallMM });
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.drawImage(photo.shade, 0, 0);
+  }
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.drawImage(photo.mask, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  photo.layerKey = key;
+  return photo.layer;
+}
+
+// Кадрирование «cover» с фокусом на стене и горизонтальным панорамированием.
+function photoViewport(w, h) {
+  const { w: pw, h: ph } = photo;
+  const scale = Math.max(w / pw, h / ph);
+  const sw = w / scale, sh = h / scale;
+  const sx = clamp(PHOTO.focus[0] * pw - sw / 2 + photo.panX, 0, pw - sw);
+  const sy = clamp(PHOTO.focus[1] * ph - sh / 2, 0, ph - sh);
+  return { sx, sy, sw, sh, scale };
+}
+
+function renderPhoto(ctx, w, h, st) {
+  const layer = ensurePhotoLayer(st);
+  const v = photoViewport(w, h);
+  ctx.drawImage(photo.canvas, v.sx, v.sy, v.sw, v.sh, 0, 0, w, h);
+  ctx.drawImage(layer, v.sx, v.sy, v.sw, v.sh, 0, 0, w, h);
+}
+
+function photoModeActive() {
+  return state.mode === 'photo' && photo.ready;
+}
+
+function initPhotoPan(canvas) {
+  let dragging = false, lastX = 0, moved = false;
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!photoModeActive()) return;
+    dragging = true; moved = false; lastX = e.clientX;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!dragging || !photoModeActive()) return;
+    const dx = e.clientX - lastX;
+    lastX = e.clientX;
+    if (Math.abs(dx) > 0) moved = true;
+    const rect = canvas.getBoundingClientRect();
+    const v = photoViewport(rect.width, rect.height);
+    photo.panX = clamp(photo.panX - dx / v.scale, -photo.w, photo.w);
+    scheduleRender();
+  });
+  const stop = () => { dragging = false; };
+  canvas.addEventListener('pointerup', stop);
+  canvas.addEventListener('pointercancel', stop);
+  canvas.addEventListener('lostpointercapture', stop);
+}
+
 /* ---------- UI ---------- */
 
 const $ = (q) => document.querySelector(q);
 const els = {
   wall: $('#wall'),
+  modes: $('#modes'),
   caption: $('#caption'),
   patterns: $('#patterns'),
   brickSw: $('#brickSwatches'),
@@ -364,12 +589,16 @@ function select(key, id) {
 }
 
 function syncUI() {
-  const groups = [[els.patterns, 'pattern'], [els.brickSw, 'brick'], [els.jointSw, 'joint']];
+  const groups = [[els.modes, 'mode'], [els.patterns, 'pattern'], [els.brickSw, 'brick'], [els.jointSw, 'joint']];
   for (const [container, key] of groups) {
     container.querySelectorAll('[role="radio"]').forEach((b) => {
       b.setAttribute('aria-checked', String(b.dataset.id === state[key]));
     });
   }
+  const photoBtn = els.modes.querySelector('[data-id="photo"]');
+  photoBtn.disabled = photo.failed;
+  photoBtn.title = photo.failed ? 'Фото недоступно' : '';
+  document.body.classList.toggle('mode-photo', photoModeActive());
   const p = byId(PATTERNS, state.pattern);
   const bc = byId(BRICK_COLORS, state.brick);
   const jc = byId(JOINT_COLORS, state.joint);
@@ -388,7 +617,10 @@ function scheduleRender() {
 
 function draw() {
   const main = fitCanvas(els.wall);
-  if (main) renderWall(main.ctx, main.w, main.h, state);
+  if (main) {
+    if (photoModeActive()) renderPhoto(main.ctx, main.w, main.h, state);
+    else renderWall(main.ctx, main.w, main.h, state);
+  }
   els.patterns.querySelectorAll('.pattern').forEach((btn) => {
     const cv = btn.querySelector('canvas');
     const t = fitCanvas(cv);
@@ -446,11 +678,20 @@ function haptic() {
 /* ---------- Экспорт PNG ---------- */
 
 function makeExportCanvas() {
-  const W = 1600, H = 1000, bar = 150;
+  const W = 1600, bar = 150;
+  const isPhoto = photoModeActive();
+  const wallH = isPhoto ? Math.round(photo.h * (W / photo.w)) : 850;
+  const H = wallH + bar;
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const ctx = c.getContext('2d');
-  renderWall(ctx, W, H - bar, state, { wallMM: 2400 });
+  if (isPhoto) {
+    const layer = ensurePhotoLayer(state);
+    ctx.drawImage(photo.canvas, 0, 0, W, wallH);
+    ctx.drawImage(layer, 0, 0, W, wallH);
+  } else {
+    renderWall(ctx, W, wallH, state, { wallMM: 2400 });
+  }
 
   const p = byId(PATTERNS, state.pattern);
   const bc = byId(BRICK_COLORS, state.brick);
@@ -563,8 +804,11 @@ function init() {
   buildPatterns();
   buildSwatches(els.brickSw, BRICK_COLORS, 'brick');
   buildSwatches(els.jointSw, JOINT_COLORS, 'joint');
+  els.modes.querySelectorAll('[role="radio"]').forEach((b) => b.addEventListener('click', () => select('mode', b.dataset.id)));
+  initPhotoPan(els.wall);
   syncUI();
   initTelegram();
+  loadPhoto();
   els.save.addEventListener('click', exportPNG);
   if ('ResizeObserver' in window) new ResizeObserver(scheduleRender).observe(els.wall);
   window.addEventListener('resize', scheduleRender);
@@ -575,4 +819,10 @@ function init() {
 init();
 
 // Для отладки в консоли
-window.facade = { state, draw, renderWall, makeExportCanvas, PATTERNS, BRICK_COLORS, JOINT_COLORS };
+window.facade = {
+  state, draw, renderWall, makeExportCanvas, PATTERNS, BRICK_COLORS, JOINT_COLORS, PHOTO, photo,
+  // photoDebug(true) подсвечивает маску стены красным — для подбора полигонов и порогов.
+  photoDebug(on) { photo.debug = !!on; photo.layerKey = ''; scheduleRender(); },
+  // Пересобрать слои после правки PHOTO.key / regions / holes / wallMM из консоли.
+  rebuildPhoto() { if (photo.canvas) { buildPhotoLayers(); scheduleRender(); } },
+};
