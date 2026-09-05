@@ -315,4 +315,5 @@ section h2 {
   cursor: pointer;
 }
 
-.overlay a.primary { background: var(--accent); border-color: var(--accent); }
+.overlay .primary { background: var(--accent); border-color: var(--accent); }
+.overlay button:disabled { opacity: 0.6; }

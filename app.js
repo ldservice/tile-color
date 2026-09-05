@@ -452,8 +452,15 @@ function loadPhoto() {
     }
     syncUI();
     scheduleRender();
+    maybeRunPendingExport();
   };
-  img.onerror = () => { photo.failed = true; console.warn('Фото не загрузилось'); syncUI(); scheduleRender(); };
+  img.onerror = () => {
+    photo.failed = true;
+    console.warn('Фото не загрузилось');
+    syncUI();
+    scheduleRender();
+    maybeRunPendingExport();
+  };
   img.src = PHOTO.src;
 }
 
@@ -757,45 +764,135 @@ function showOverlay(blob, name) {
   document.body.appendChild(ov);
 }
 
+function canWebShareFiles() {
+  if (!navigator.canShare || typeof File === 'undefined') return false;
+  try {
+    return navigator.canShare({ files: [new File([new Blob()], 'x.png', { type: 'image/png' })] });
+  } catch (e) { return false; }
+}
+
+async function makeExportBlob() {
+  const c = makeExportCanvas();
+  const blob = await new Promise((resolve) => c.toBlob(resolve, 'image/png'));
+  if (!blob) throw new Error('toBlob failed');
+  return blob;
+}
+
+function exportFileName() {
+  return `fasad-${state.pattern}-${state.brick}-${state.joint}.png`;
+}
+
+// Отдаёт готовый PNG: системное «Поделиться» → скачивание → оверлей с картинкой.
+async function deliverBlob(blob, name) {
+  if (canWebShareFiles()) {
+    const file = new File([blob], name, { type: 'image/png' });
+    try {
+      await navigator.share({ files: [file], title: 'Фасад — трафаретный кирпич' });
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return; // пользователь отменил
+    }
+  }
+  if ('download' in HTMLAnchorElement.prototype && !isTelegram()) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } else {
+    showOverlay(blob, name);
+  }
+}
+
+// Ссылка на эту же страницу с текущим выбором — чтобы открыть её во внешнем браузере из Telegram.
+function exportUrl() {
+  const u = new URL(location.href);
+  u.hash = '';
+  u.search = '';
+  for (const k of ['mode', 'pattern', 'brick', 'joint']) u.searchParams.set(k, state[k]);
+  u.searchParams.set('export', '1');
+  return u.toString();
+}
+
 async function exportPNG() {
   els.save.disabled = true;
   try {
-    const c = makeExportCanvas();
-    const blob = await new Promise((resolve) => c.toBlob(resolve, 'image/png'));
-    if (!blob) throw new Error('toBlob failed');
-    const name = `fasad-${state.pattern}-${state.brick}-${state.joint}.png`;
-
-    if (navigator.canShare && typeof File !== 'undefined') {
-      const file = new File([blob], name, { type: 'image/png' });
-      if (navigator.canShare({ files: [file] })) {
-        try {
-          await navigator.share({ files: [file], title: 'Фасад — трафаретный кирпич' });
-          return;
-        } catch (e) {
-          if (e && e.name === 'AbortError') return; // пользователь отменил
-        }
-      }
+    // Внутри Telegram нет Web Share, а скачивание blob-файлов WebView блокирует:
+    // открываем страницу во внешнем браузере, там сработает системное «Поделиться».
+    if (isTelegram() && !canWebShareFiles() && tg.openLink) {
+      tg.openLink(exportUrl());
+      return;
     }
-
-    const canDownload = 'download' in HTMLAnchorElement.prototype && !isTelegram();
-    if (canDownload) {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-    } else {
-      showOverlay(blob, name);
-    }
+    await deliverBlob(await makeExportBlob(), exportFileName());
   } catch (e) {
     console.error(e);
     alert('Не удалось подготовить картинку. Попробуйте ещё раз.');
   } finally {
     els.save.disabled = false;
   }
+}
+
+// Страница открыта по ссылке с ?export=1 (из Telegram): показываем готовую картинку
+// и кнопку сохранения — «Поделиться» браузер разрешает только по жесту пользователя.
+async function showExportPrompt() {
+  const blob = await makeExportBlob();
+  const name = exportFileName();
+  const url = URL.createObjectURL(blob);
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.setAttribute('role', 'dialog');
+  ov.setAttribute('aria-label', 'Сохранение картинки');
+
+  const img = document.createElement('img');
+  img.src = url;
+  img.alt = 'Превью кладки';
+  const hint = document.createElement('p');
+  hint.textContent = 'Картинка готова. Нажмите, чтобы сохранить или отправить.';
+  const row = document.createElement('div');
+  row.className = 'row';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'primary';
+  save.textContent = 'Сохранить / Поделиться';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.textContent = 'Закрыть';
+  row.append(save, close);
+  ov.append(img, hint, row);
+
+  const dismiss = () => { ov.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); };
+  save.addEventListener('click', async () => {
+    save.disabled = true;
+    try { await deliverBlob(blob, name); } catch (e) { console.error(e); } finally { save.disabled = false; }
+  });
+  close.addEventListener('click', dismiss);
+  document.body.appendChild(ov);
+}
+
+let pendingExport = false;
+
+// Состояние из адреса (?mode=&pattern=&brick=&joint=&export=1). Возвращает true, если нужно сразу показать экспорт.
+function applyUrlState() {
+  const q = new URLSearchParams(location.search);
+  if (![...q.keys()].length) return false;
+  const lists = { pattern: PATTERNS, brick: BRICK_COLORS, joint: JOINT_COLORS };
+  if (MODES.includes(q.get('mode'))) state.mode = q.get('mode');
+  for (const [k, list] of Object.entries(lists)) if (byId(list, q.get(k))) state[k] = q.get(k);
+  saveState();
+  const wantsExport = q.get('export') === '1';
+  try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignore */ }
+  return wantsExport;
+}
+
+function maybeRunPendingExport() {
+  if (!pendingExport) return;
+  if (state.mode === 'photo' && !photo.ready && !photo.failed) return; // ждём фото
+  pendingExport = false;
+  draw();
+  showExportPrompt().catch((e) => console.error(e));
 }
 
 /* ---------- Инициализация ---------- */
@@ -806,10 +903,12 @@ function init() {
   buildSwatches(els.jointSw, JOINT_COLORS, 'joint');
   els.modes.querySelectorAll('[role="radio"]').forEach((b) => b.addEventListener('click', () => select('mode', b.dataset.id)));
   initPhotoPan(els.wall);
+  pendingExport = applyUrlState();
   syncUI();
   initTelegram();
   loadPhoto();
   els.save.addEventListener('click', exportPNG);
+  maybeRunPendingExport();
   if ('ResizeObserver' in window) new ResizeObserver(scheduleRender).observe(els.wall);
   window.addEventListener('resize', scheduleRender);
   window.addEventListener('orientationchange', scheduleRender);
