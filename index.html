@@ -13,6 +13,10 @@
 <body>
   <main class="app">
     <div class="preview">
+      <div class="modes" id="modes" role="radiogroup" aria-label="Режим превью">
+        <button type="button" role="radio" data-id="photo" aria-checked="true">Фото дома</button>
+        <button type="button" role="radio" data-id="scheme" aria-checked="false">Схема кладки</button>
+      </div>
       <canvas id="wall" aria-label="Превью кладки"></canvas>
       <div class="caption" id="caption" aria-live="polite"></div>
     </div>
