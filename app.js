@@ -54,7 +54,7 @@ const PHOTOS = [
       [[0.905, 0.20], [1.0, 0.0], [1.0, 0.88], [0.905, 0.86]],                  // возврат за углом
     ],
     holes: [
-      [[0.45, 0.29], [0.63, 0.29], [0.63, 0.55], [0.45, 0.55]],                 // окно
+      [[0.435, 0.29], [0.635, 0.29], [0.635, 0.52], [0.435, 0.52]],             // окно
       [[0.0, 0.83], [1.0, 0.86], [1.0, 1.0], [0.0, 1.0]],                        // цоколь/земля снизу
     ],
   },
@@ -66,7 +66,7 @@ const PHOTOS = [
       [[0.52, 0.15], [0.725, 0.22], [0.725, 0.80], [0.52, 0.82]],               // правая плоскость (на солнце)
     ],
     holes: [
-      [[0.27, 0.20], [0.38, 0.20], [0.38, 0.34], [0.27, 0.34]],                 // окно
+      [[0.335, 0.265], [0.425, 0.265], [0.425, 0.40], [0.335, 0.40]],           // окно
       [[0.0, 0.80], [0.70, 0.76], [0.70, 1.0], [0.0, 1.0]],                      // цоколь снизу
     ],
   },
@@ -77,7 +77,7 @@ const PHOTOS = [
       [[0.03, 0.0], [1.0, 0.0], [1.0, 0.82], [0.03, 0.92]],                     // одна плоскость, уходит вправо
     ],
     holes: [
-      [[0.85, 0.12], [0.95, 0.12], [0.95, 0.30], [0.85, 0.30]],                 // окно справа
+      [[0.862, 0.11], [0.965, 0.11], [0.965, 0.31], [0.862, 0.31]],             // окно справа
       [[0.0, 0.90], [1.0, 0.80], [1.0, 1.0], [0.0, 1.0]],                        // низ
     ],
   },
@@ -416,11 +416,11 @@ function rasterizePolygons(conf, w, h) {
 }
 
 /*
- * Один раз на фото. Готуємо дані для перефарбування зі збереженням яскравості:
- *   out = brickColor·a[i] + jointColor·b[i]
- * де t — «тіловість» (1 на тілі цеглини, 0 на шві), ratio = L/refL(матеріалу),
- * a = t·ratio, b = (1-t)·ratio. Так фактура, тіні й перспектива зберігаються,
- * а колір тіла й шва беруться окремо.
+ * Один раз на фото. Стіну перефарбовуємо в РІВНИЙ колір без перепадів освітлення:
+ *   out = brickColor·t + jointColor·(1-t)
+ * де t — «тіловість» (1 на тілі цеглини, 0 на шві), обчислена як різниця яскравості
+ * з локальним середнім (high-pass) — вона не залежить від великих тіней, тому колір
+ * виходить однорідним і на сонці, і в тіні. Яскравість пікселя в колір НЕ входить.
  */
 function buildPhotoData(P) {
   const { canvas: cv, w, h, conf } = P;
@@ -439,7 +439,7 @@ function buildPhotoData(P) {
     }
   }
 
-  // Локальне середнє яскравості по стіні (нормоване, щоб краї маски не темнили).
+  // Локальне середнє яскравості (нормоване по масці) — базова лінія для швів.
   const r = Math.max(3, Math.round(Math.min(w, h) * (conf.avgFrac || 0.02)));
   const lmMasked = new Float32Array(n);
   for (let i = 0; i < n; i++) lmMasked[i] = inMask[i] ? Ln[i] : 0;
@@ -447,28 +447,16 @@ function buildPhotoData(P) {
   const blurM = boxBlur(Float32Array.from(inMask), w, h, r);
 
   // «Тіловість» t: тіло цеглини світліше за локальне середнє, шов — темніший.
+  // High-pass прибирає великі тіні, тому t (а отже й колір) однорідний по стіні.
   const delta = conf.tDelta || 0.05;
+  const sharp = conf.tSharp || 1.6; // різкіший поділ тіло/шов, щоб колір був чистим
   const t = new Float32Array(n);
-  let brickSum = 0, brickCnt = 0, mortarSum = 0, mortarCnt = 0;
   for (let i = 0; i < n; i++) {
     if (!inMask[i]) continue;
     const local = blurM[i] > 0.02 ? blurL[i] / blurM[i] : Ln[i];
-    const ti = smoothstep(-delta, delta, Ln[i] - local);
+    let ti = smoothstep(-delta, delta, Ln[i] - local);
+    ti = clamp((ti - 0.5) * sharp + 0.5, 0, 1);
     t[i] = ti;
-    if (ti > 0.6) { brickSum += Ln[i]; brickCnt++; }
-    else if (ti < 0.4) { mortarSum += Ln[i]; mortarCnt++; }
-  }
-  const brickMean = brickCnt ? brickSum / brickCnt : 0.55;
-  const mortarMean = mortarCnt ? mortarSum / mortarCnt : 0.4;
-
-  // Попередньо: a = t·ratio, b = (1-t)·ratio; ratio = L / refL(матеріалу).
-  const a = new Float32Array(n), b = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    if (!inMask[i]) continue;
-    const ref = Math.max(0.06, t[i] * brickMean + (1 - t[i]) * mortarMean);
-    const ratio = clamp(Ln[i] / ref, 0, 1.55);
-    a[i] = t[i] * ratio;
-    b[i] = (1 - t[i]) * ratio;
   }
 
   // М'яка альфа краю маски.
@@ -476,7 +464,7 @@ function buildPhotoData(P) {
   const maskA = new Uint8ClampedArray(n);
   for (let i = 0; i < n; i++) maskA[i] = soft[i] * 255;
 
-  P.a = a; P.b = b; P.maskA = maskA;
+  P.t = t; P.maskA = maskA;
   P.layer = document.createElement('canvas');
   P.layer.width = w; P.layer.height = h;
   P.layerKey = '';
@@ -514,7 +502,7 @@ function loadPhoto(P) {
 function ensurePhotoLayer(P, st) {
   const key = [st.brick, st.joint, photoDebug ? 'dbg' : ''].join('|');
   if (P.layerKey === key) return P.layer;
-  const { w, h, a, b, maskA } = P;
+  const { w, h, t, maskA } = P;
   const ctx = P.layer.getContext('2d');
   const img = ctx.createImageData(w, h);
   const d = img.data;
@@ -523,11 +511,12 @@ function ensurePhotoLayer(P, st) {
   } else {
     const [br, bg, bb] = hexToRgb(byId(BRICK_COLORS, st.brick).hex);
     const [mr, mg, mb] = hexToRgb(byId(JOINT_COLORS, st.joint).hex);
+    // Рівний колір: тіло цеглини — колір кирпича, шов — колір шва, без тіней.
     for (let i = 0; i < w * h; i++) {
-      const ai = a[i], bi = b[i];
-      d[i * 4] = ai * br + bi * mr;
-      d[i * 4 + 1] = ai * bg + bi * mg;
-      d[i * 4 + 2] = ai * bb + bi * mb;
+      const ti = t[i], mi = 1 - ti;
+      d[i * 4] = ti * br + mi * mr;
+      d[i * 4 + 1] = ti * bg + mi * mg;
+      d[i * 4 + 2] = ti * bb + mi * mb;
       d[i * 4 + 3] = maskA[i];
     }
   }
