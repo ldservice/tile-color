@@ -95,13 +95,58 @@ body {
   color: var(--accent-text);
 }
 
-/* В режиме фото превью держит пропорции снимка и панорамируется по горизонтали */
+/* В режиме фото превью держит пропорции активного снимка (размер задаётся из JS) */
 body.mode-photo .preview canvas {
-  aspect-ratio: 4 / 3;
   height: auto;
-  max-height: 42dvh;
-  touch-action: pan-y;
-  cursor: grab;
+  margin: 0 auto;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.2);
+}
+
+/* Лента выбора фото — видна только в режиме «Фото» */
+.photos { display: none; }
+
+body.mode-photo .photos {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.photos::-webkit-scrollbar { display: none; }
+
+.photos button {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 92px;
+  height: 60px;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: var(--card) center / cover no-repeat;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.photos button[aria-checked="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.photos button span {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 2px 4px;
+  font-size: 10px;
+  line-height: 1.2;
+  color: #fff;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.65));
+  text-align: left;
 }
 
 .caption {
